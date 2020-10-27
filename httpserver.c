@@ -31,6 +31,57 @@ char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
 
+/* HELPER FUNCTIONS */
+void http_send_file(int fd, char* path) {
+  char *buffer;
+  FILE* file;
+  long length;
+
+  file = fopen(path, "rb");
+  if (file == NULL) {
+    printf("Failed to open file %s\n", path);
+  } else {
+    fseek(file, 0, SEEK_END);
+    length = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    buffer = malloc(length + 1);
+    if (buffer) {
+      fread(buffer, 1, length, file);
+      buffer[length] = '\0';
+
+      http_start_response(fd, 200);
+      http_send_header(fd, "Content-Type", http_get_mime_type(path));
+      http_end_headers(fd);
+      http_send_string(fd, buffer);
+    }
+    free(buffer);
+  }
+  fclose(file);
+}
+
+void http_send_directory(int fd, char* path) {
+  char *index_path;
+  DIR *dir;
+  struct stat info;
+
+  dir = opendir(path);
+  if (dir == NULL) {
+    printf("Failed to open directory %s\n", path);
+  } else {
+    index_path = malloc(strlen(path) + 11);
+    strcpy(index_path, path);
+    strcat(index_path, "/index.html");
+
+    /* Directory contains an index.html file? */
+    if (stat(index_path, &info) == 0) {
+      http_send_file(fd, index_path);
+    } else {
+      /* Create page with links to all files in the directory */
+    }
+    free(index_path);
+  }
+}
+
 /*
  * Reads an HTTP request from stream (fd), and writes an HTTP response
  * containing:
@@ -53,30 +104,34 @@ void handle_files_request(int fd) {
   struct stat info;
 
   /* Get the absolute path to the requested file or directory*/
-  char *abs_path;
+  char *abs_path = malloc(strlen(server_files_directory) + strlen(request->path));
+  char *index_path;
+
   strcpy(abs_path, server_files_directory);
   strcat(abs_path, request->path);
-  printf("Absolute path: %s\n", abs_path);
    
   /* Does the file/directory exist? */
   if (stat(abs_path, &info) == 0) {
-    printf("Requested file or directory %s exists\n", abs_path);
-    /* Determine whether the client requested a file or a directory using the info struct, handle accordingly*/
+    /* Is it a file or a directory? */
+    if (S_ISREG(info.st_mode)) {
+      /* Handle regular file */
+      http_send_file(fd, abs_path);
+    } else if (S_ISDIR(info.st_mode)) {
+      /* Handle directory */
+      http_send_directory(fd, abs_path);
+    }
   } else {
-    /* Send a 404 page */
+    /* Send a 404 page (this is temporary) */
     printf("Requested file or directory %s does not exist\n", abs_path);
+    http_start_response(fd, 404);
+    http_send_header(fd, "Content-Type", "text/html");
+    http_end_headers(fd);
+    http_send_string(fd,
+	"<center>"
+	"<h1>The file you requested does not exist :(</h1>"
+	"</center>");
   }
-
-  /* REMOVE THIS WHEN DONE */
-  http_start_response(fd, 200);
-  http_send_header(fd, "Content-Type", "text/html");
-  http_end_headers(fd);
-  http_send_string(fd,
-      "<center>"
-      "<h1>Welcome to httpserver!</h1>"
-      "<hr>"
-      "<p>Nothing's here yet.</p>"
-      "</center>");
+  free(abs_path);
 }
 
 
