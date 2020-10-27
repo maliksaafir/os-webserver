@@ -32,6 +32,38 @@ char *server_proxy_hostname;
 int server_proxy_port;
 
 /* HELPER FUNCTIONS */
+void http_create_dirlist(int n,
+			 struct dirent **fnames,
+			 char *buffer) {
+  printf("CREATING DIRECTORY LIST\n");
+  char *li = NULL;
+  int len;
+  strcpy(buffer, "<h1>Files</h1>"
+  	         "<ul>"
+	         "<li><a href='../'>"
+		 "Parent directory"
+		 "</a></li>");
+  for (int i = 0; i < n; i++) {
+    if (strcmp(fnames[i]->d_name, ".") == 0
+    	|| strcmp(fnames[i]->d_name, "..") == 0
+	|| (fnames[i]->d_type != DT_REG && fnames[i]->d_type != DT_DIR)) {
+      continue;
+    }
+    /* <li><a href="fnames[i]">fnames[i]</a></li> */
+    len = 24 + 2*strlen(fnames[i]->d_name);
+    li = malloc(len); // +1 for null terminator
+    strcpy(li, "<li><a href='");
+    strcat(li, fnames[i]->d_name);
+    strcat(li, "'>");
+    strcat(li, fnames[i]->d_name);
+    strcat(li, "</a></li>");
+    
+    strcat(buffer, li);
+    free(li);
+  }
+  strcat(buffer, "</ul>");
+}
+
 void http_send_file(int fd, char* path) {
   char *buffer;
   FILE* file;
@@ -60,26 +92,34 @@ void http_send_file(int fd, char* path) {
 }
 
 void http_send_directory(int fd, char* path) {
+  char buffer[1000];
   char *index_path;
-  DIR *dir;
+  int len = strlen(path) + 12, n;
+  struct dirent **fname_list;
   struct stat info;
 
-  dir = opendir(path);
-  if (dir == NULL) {
-    printf("Failed to open directory %s\n", path);
-  } else {
-    index_path = malloc(strlen(path) + 11);
-    strcpy(index_path, path);
-    strcat(index_path, "/index.html");
+  index_path = malloc(len + 1);
+  strcpy(index_path, path);
+  strcat(index_path, "/index.html");
+  index_path[len] = '\0';
 
-    /* Directory contains an index.html file? */
-    if (stat(index_path, &info) == 0) {
-      http_send_file(fd, index_path);
+  /* Directory contains an index.html file? */
+  if (stat(index_path, &info) == 0) {
+    http_send_file(fd, index_path);
+  } else {
+    /* Create page with links to all files in the directory */
+    n = scandir(path, &fname_list, NULL, alphasort);
+    if (n < 0) {
+      printf("Error occurred while reading directory %s\n", path);
     } else {
-      /* Create page with links to all files in the directory */
+      http_create_dirlist(n, fname_list, buffer);
+      http_start_response(fd, 200);
+      http_send_header(fd, "Content-Type", "text/html");
+      http_end_headers(fd);
+      http_send_string(fd, buffer);
     }
-    free(index_path);
   }
+  free(index_path);
 }
 
 /*
@@ -94,7 +134,6 @@ void http_send_directory(int fd, char* path) {
  *   4) Send a 404 Not Found response.
  */
 void handle_files_request(int fd) {
-
   /*
    * TODO: Your solution for Task 1 goes here! Feel free to delete/modify *
    * any existing code.
@@ -104,11 +143,16 @@ void handle_files_request(int fd) {
   struct stat info;
 
   /* Get the absolute path to the requested file or directory*/
-  char *abs_path = malloc(strlen(server_files_directory) + strlen(request->path));
-  char *index_path;
+  char *abs_path;
 
+  /* Something here may cause occasional SEGFAULT */
+  int len = strlen(server_files_directory)
+  	    + strlen(request->path);
+
+  abs_path = malloc(len + 1);
   strcpy(abs_path, server_files_directory);
   strcat(abs_path, request->path);
+  abs_path[len] = '\0';
    
   /* Does the file/directory exist? */
   if (stat(abs_path, &info) == 0) {
@@ -121,17 +165,11 @@ void handle_files_request(int fd) {
       http_send_directory(fd, abs_path);
     }
   } else {
-    /* Send a 404 page (this is temporary) */
-    printf("Requested file or directory %s does not exist\n", abs_path);
+    /* Send a 404 response */
     http_start_response(fd, 404);
-    http_send_header(fd, "Content-Type", "text/html");
-    http_end_headers(fd);
-    http_send_string(fd,
-	"<center>"
-	"<h1>The file you requested does not exist :(</h1>"
-	"</center>");
   }
   free(abs_path);
+  free(request);
 }
 
 
