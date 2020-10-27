@@ -38,3 +38,6 @@
 # Debug files
 *.dSYM/
 *.su
+
+# Vim side effect files
+*.swp
