@@ -31,11 +31,13 @@ char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
 
+pthread_t *thread_pool = NULL;
+
 /* HELPER FUNCTIONS */
 void http_create_dirlist(int n,
 			 struct dirent **fnames,
 			 char *buffer) {
-  printf("CREATING DIRECTORY LIST\n");
+  printf("Creating directory list...\n");
   char *li = NULL;
   int len;
   strcpy(buffer, "<h1>Files</h1>"
@@ -51,7 +53,7 @@ void http_create_dirlist(int n,
     }
     /* <li><a href="fnames[i]">fnames[i]</a></li> */
     len = 24 + 2*strlen(fnames[i]->d_name);
-    li = malloc(len); // +1 for null terminator
+    li = malloc(sizeof(char) * len + 1);
     strcpy(li, "<li><a href='");
     strcat(li, fnames[i]->d_name);
     strcat(li, "'>");
@@ -65,6 +67,7 @@ void http_create_dirlist(int n,
 }
 
 void http_send_file(int fd, char* path) {
+  printf("Sending file %s to socket %d...\n", path, fd);
   char *buffer;
   FILE* file;
   long length;
@@ -92,6 +95,7 @@ void http_send_file(int fd, char* path) {
 }
 
 void http_send_directory(int fd, char* path) {
+  printf("Sending directory %s to socket %d...\n", path, fd);
   char buffer[1000];
   char *index_path;
   int len = strlen(path) + 12, n;
@@ -138,7 +142,7 @@ void handle_files_request(int fd) {
    * TODO: Your solution for Task 1 goes here! Feel free to delete/modify *
    * any existing code.
    */
-
+  printf("Handling files request from socket %d...\n", fd);
   struct http_request *request = http_request_parse(fd);
   struct stat info;
 
@@ -232,11 +236,29 @@ void handle_proxy_request(int fd) {
   */
 }
 
+/* THREAD FUNCTION */
+void *thread_function(void *arg) {
+  printf("Entering the thread function...\n");
+  int connection_socket;
+  void (*request_handler)(int) = arg;
+  while (1) {
+    connection_socket = wq_pop(&work_queue);
+    request_handler(connection_socket);
+    close(connection_socket);
+  }
+}
+
 
 void init_thread_pool(int num_threads, void (*request_handler)(int)) {
   /*
    * TODO: Part of your solution for Task 2 goes here!
    */
+  printf("Initializing thread pool with %d threads...\n", num_threads);
+  wq_init(&work_queue);
+  thread_pool = (pthread_t*)malloc(num_threads * sizeof(pthread_t));
+  for (int i = 0; i < num_threads; i++) {
+    pthread_create(&thread_pool[i], NULL, &thread_function, request_handler);
+  }
 }
 
 /*
@@ -297,13 +319,19 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
         client_address.sin_port);
 
     // TODO: Change me?
-    request_handler(client_socket_number);
-    close(client_socket_number);
+    wq_push(&work_queue, client_socket_number); // add each new connection to the queue
+
+
+    /* request_handler(client_socket_number);
+    close(client_socket_number); */
 
     printf("Accepted connection from %s on port %d\n",
         inet_ntoa(client_address.sin_addr),
         client_address.sin_port);
   }
+
+  /* Deallocate thread pool */
+  free(thread_pool);
 
   shutdown(*socket_number, SHUT_RDWR);
   close(*socket_number);
