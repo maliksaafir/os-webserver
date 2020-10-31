@@ -191,9 +191,12 @@ void handle_files_request(int fd) {
 void *proxy_client_thread_func(void *arg) {
   printf("Entering proxy client thread function...\n");
   char buffer[LIBHTTP_REQUEST_MAX_SIZE];
+  char first_line[LIBHTTP_REQUEST_MAX_SIZE];
+  char second_line[LIBHTTP_REQUEST_MAX_SIZE];
+  char port_num[8];
   int n_bytes;
   struct proxy_session_info *info = arg;
- 
+
   while (1) {
     // clear the buffer
     memset(&buffer, '\0', sizeof(buffer));
@@ -216,8 +219,43 @@ void *proxy_client_thread_func(void *arg) {
       // write the request to the server
       // TODO: re-structure the request so it has the right hostname header
       printf("request:\n%s\n", buffer);
+
+      memset(&first_line, '\0', sizeof(first_line));
+      memset(&second_line, '\0', sizeof(second_line));
+      int i, j;
+      
+      for (i = 0; i < n_bytes && buffer[i] != '\n'; i++) {
+        
+      }
+      i++;
+      memcpy(&first_line, buffer, i); // copy first line into first_line
+      for (j = i; j < n_bytes && buffer[j] != '\n'; j++) {
+
+      }
+      j++;
+      memcpy(&second_line, buffer + i, j - i);
+
+      printf("First line:\n%s", first_line);
+      printf("Second line:\n%s", second_line);
+
+      memset(&second_line, '\0', sizeof(second_line));
+      strcpy(second_line, "Host: ");
+      strcat(second_line, "www.");
+      strcat(second_line, info->server_hostname);
+      strcat(second_line, ":");
+      
+      sprintf(port_num, "%d", info->server_port);
+
+      strcat(second_line, port_num);
+      strcat(second_line, "\r\n");
+
+      printf("New second line:\n%s", second_line);
+
       pthread_mutex_lock(&info->server_mut);
-      n_bytes = write(info->server_fd, buffer, n_bytes);
+      write(info->server_fd, first_line, strlen(first_line));
+      write(info->server_fd, second_line, strlen(second_line));
+      printf("New rest of request:\n%s", buffer + j);
+      n_bytes = write(info->server_fd, buffer + j, n_bytes);
       pthread_cond_signal(&info->cond);
       pthread_cond_wait(&info->cond, &info->server_mut);
       pthread_mutex_unlock(&info->server_mut);
@@ -228,17 +266,18 @@ void *proxy_client_thread_func(void *arg) {
 /* PROXY SERVER THREAD FUNCTION */
 void *proxy_server_thread_func(void *arg) {
   printf("Entering proxy server thread function...\n");
-  char buffer[LIBHTTP_REQUEST_MAX_SIZE];
+  int chunk_size = 200;
+  int full_size = chunk_size;
+  char static_buf[chunk_size];
+  char *dyn_buf = malloc(chunk_size);
   int n_bytes;
   struct proxy_session_info *info = arg;
 
   while (1) {
-    // clear the buffer
-    memset(&buffer, '\0', sizeof(buffer));
-
     // read from the server
     pthread_mutex_lock(&info->server_mut);
-    n_bytes = read(info->server_fd, buffer, sizeof(buffer));
+    printf("reading response...\n");
+    n_bytes = read(info->server_fd, static_buf, chunk_size);
     pthread_mutex_unlock(&info->server_mut);
 
     if (n_bytes < 0) {
@@ -251,10 +290,35 @@ void *proxy_server_thread_func(void *arg) {
       // keep checking for data
       sleep(1);
     } else {
+      memcpy(dyn_buf, static_buf, chunk_size);
+      pthread_mutex_lock(&info->server_mut);
+      memset(static_buf, '\0', chunk_size);
+      while ( (n_bytes = read(info->server_fd, static_buf, chunk_size)) > 0) {
+        pthread_mutex_unlock(&info->server_mut);
+        printf("full size: %d, n_bytes: %d\n", full_size, n_bytes);
+        full_size += n_bytes;
+        dyn_buf = realloc(dyn_buf, full_size);
+        strcat(dyn_buf, static_buf);
+        memset(static_buf, '\0', chunk_size);
+        pthread_mutex_lock(&info->server_mut);
+      }
+      pthread_mutex_unlock(&info->server_mut);
+      dyn_buf[full_size] = '\0';
+
       // write response to the client
-      printf("response:\n%s\n", buffer);
+      printf("response:\n%s\n", dyn_buf);
       pthread_mutex_lock(&info->client_mut);
-      n_bytes = write(info->client_fd, buffer, n_bytes);
+      /*if (n_bytes < 0) {
+        perror("client socket closed\n");
+        pthread_mutex_lock(&info->server_mut);
+        close(info->server_fd);
+        pthread_mutex_unlock(&info->server_mut);
+        return NULL;
+      }*/
+
+      http_send_string(info->client_fd, dyn_buf);
+      free(dyn_buf);
+      //printf("wrote %d bytes to client socket\n", n_bytes);
       pthread_cond_signal(&info->cond);
       pthread_cond_wait(&info->cond, &info->client_mut);
       pthread_mutex_unlock(&info->client_mut);
@@ -323,7 +387,8 @@ void handle_proxy_request(int fd) {
   pthread_t client_thread, server_thread;
 
   info->server_hostname = malloc(sizeof(server_proxy_hostname));
-  memcpy(info->server_hostname, server_proxy_hostname);
+  memcpy(info->server_hostname, server_proxy_hostname, strlen(server_proxy_hostname));
+  info->server_hostname[strlen(server_proxy_hostname)] = '\0';
   info->server_port = server_proxy_port;
   info->client_fd = fd;
   info->server_fd = client_socket_fd;
@@ -333,6 +398,8 @@ void handle_proxy_request(int fd) {
   
   pthread_create(&client_thread, NULL, &proxy_client_thread_func, (void*) info);
   pthread_create(&server_thread, NULL, &proxy_server_thread_func, (void*) info);
+  pthread_join(client_thread, NULL);
+  pthread_join(server_thread, NULL);
 }
 
 /* THREAD FUNCTION */
@@ -343,6 +410,7 @@ void *thread_function(void *arg) {
   while (1) {
     connection_socket = wq_pop(&work_queue);
     request_handler(connection_socket);
+    printf("In thread function, closing socket %d\n", connection_socket);
     close(connection_socket);
   }
 }
