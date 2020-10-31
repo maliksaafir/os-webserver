@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -31,7 +33,16 @@ char *server_files_directory;
 char *server_proxy_hostname;
 int server_proxy_port;
 
+#define LIBHTTP_REQUEST_MAX_SIZE 8192
 pthread_t *thread_pool = NULL;
+
+struct proxy_session_info {
+  char *server_hostname;
+  int server_port;
+  int client_fd, server_fd;
+  pthread_cond_t cond;
+  pthread_mutex_t client_mut, server_mut;  
+};
 
 /* HELPER FUNCTIONS */
 void http_create_dirlist(int n,
@@ -176,6 +187,80 @@ void handle_files_request(int fd) {
   free(request);
 }
 
+/* PROXY CLIENT THREAD FUNCTION */
+void *proxy_client_thread_func(void *arg) {
+  printf("Entering proxy client thread function...\n");
+  char buffer[LIBHTTP_REQUEST_MAX_SIZE];
+  int n_bytes;
+  struct proxy_session_info *info = arg;
+ 
+  while (1) {
+    // clear the buffer
+    memset(&buffer, '\0', sizeof(buffer));
+
+    // read request from client
+    pthread_mutex_lock(&info->client_mut);
+    n_bytes = read(info->client_fd, buffer, sizeof(buffer));
+    pthread_mutex_unlock(&info->client_mut);
+    
+    if (n_bytes < 0) {
+      // client_fd must be closed, quit
+      pthread_mutex_lock(&info->server_mut);
+      close(info->server_fd);
+      pthread_mutex_unlock(&info->server_mut);
+      return NULL;
+    } else if (n_bytes == 0) {
+      // keep checking for data
+      sleep(1);
+    } else {
+      // write the request to the server
+      // TODO: re-structure the request so it has the right hostname header
+      printf("request:\n%s\n", buffer);
+      pthread_mutex_lock(&info->server_mut);
+      n_bytes = write(info->server_fd, buffer, n_bytes);
+      pthread_cond_signal(&info->cond);
+      pthread_cond_wait(&info->cond, &info->server_mut);
+      pthread_mutex_unlock(&info->server_mut);
+    }
+  }
+}
+
+/* PROXY SERVER THREAD FUNCTION */
+void *proxy_server_thread_func(void *arg) {
+  printf("Entering proxy server thread function...\n");
+  char buffer[LIBHTTP_REQUEST_MAX_SIZE];
+  int n_bytes;
+  struct proxy_session_info *info = arg;
+
+  while (1) {
+    // clear the buffer
+    memset(&buffer, '\0', sizeof(buffer));
+
+    // read from the server
+    pthread_mutex_lock(&info->server_mut);
+    n_bytes = read(info->server_fd, buffer, sizeof(buffer));
+    pthread_mutex_unlock(&info->server_mut);
+
+    if (n_bytes < 0) {
+      // server socket must be closed, so quit
+      pthread_mutex_lock(&info->client_mut);
+      close(info->client_fd);
+      pthread_mutex_unlock(&info->client_mut);
+      return NULL;
+    } else if (n_bytes == 0) {
+      // keep checking for data
+      sleep(1);
+    } else {
+      // write response to the client
+      printf("response:\n%s\n", buffer);
+      pthread_mutex_lock(&info->client_mut);
+      n_bytes = write(info->client_fd, buffer, n_bytes);
+      pthread_cond_signal(&info->cond);
+      pthread_cond_wait(&info->cond, &info->client_mut);
+      pthread_mutex_unlock(&info->client_mut);
+    }
+  }
+}
 
 /*
  * Opens a connection to the proxy target (hostname=server_proxy_hostname and
@@ -234,6 +319,20 @@ void handle_proxy_request(int fd) {
   /* 
   * TODO: Your solution for task 3 belongs here! 
   */
+  struct proxy_session_info *info = malloc(sizeof(struct proxy_session_info));
+  pthread_t client_thread, server_thread;
+
+  info->server_hostname = malloc(sizeof(server_proxy_hostname));
+  memcpy(info->server_hostname, server_proxy_hostname);
+  info->server_port = server_proxy_port;
+  info->client_fd = fd;
+  info->server_fd = client_socket_fd;
+  pthread_cond_init(&info->cond, NULL);
+  pthread_mutex_init(&info->client_mut, NULL);
+  pthread_mutex_init(&info->server_mut, NULL);
+  
+  pthread_create(&client_thread, NULL, &proxy_client_thread_func, (void*) info);
+  pthread_create(&server_thread, NULL, &proxy_server_thread_func, (void*) info);
 }
 
 /* THREAD FUNCTION */
@@ -320,7 +419,6 @@ void serve_forever(int *socket_number, void (*request_handler)(int)) {
 
     // TODO: Change me?
     wq_push(&work_queue, client_socket_number); // add each new connection to the queue
-
 
     /* request_handler(client_socket_number);
     close(client_socket_number); */
